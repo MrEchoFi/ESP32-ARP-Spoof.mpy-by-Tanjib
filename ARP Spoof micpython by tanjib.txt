@@ -1,26 +1,25 @@
 //ARP Spoof by MrEchoFi- Md. Abu Naser Nayeem[Tanjib]-IOT project for penetration testing
 //This project's for educational porposes. 
 
-from machine import Pin, I2C, SoftI2C
-from u8g2 import U8G2_SSD1306_128X64_NONAME_F_HW_I2C
+from machine import Pin, I2C
+from time import sleep, ticks_ms
 import network
-import time
-import ubinascii
+import ustruct
+from u8g2 import U8G2_SSD1306_128X64_NONAME_F_HW_I2C
 
-# Pins configuration
-LED_PIN = 2  # Built-in LED on ESP32
+# Pin definitions
+LED_PIN = 2
 BUTTON_NEXT_PIN = 17
 BUTTON_PREV_PIN = 5
 BUTTON_SELECT_PIN = 18
 
+# Constants
 AUTH_PASSWORD = "ARP"
 OLED_ADDRESS = 0x3C  # I2C address for the OLED
-
-# Variables
-packetRate = 500  # Increased packet rate for more frequent attacks
-menuIndex = 0  # Track menu navigation
+packetRate = 500
+menuIndex = 0
 toggle_status = False
-packetCount = 0  # Packet counter for ARP attack
+packetCount = 0
 prevTime = 0
 
 # Wi-Fi networks
@@ -30,131 +29,143 @@ ipList = []
 networkCount = 0
 selectedNetwork = -1
 
-# Target MAC and IP (dynamic selection)
-targetMAC = [0xff, 0xff, 0xff, 0xff, 0xff, 0xff]
+# Target MAC and IP
+targetMAC = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]
 targetIP = [192, 168, 1, 100]
 
-# ARP packet template
-arp_packet = bytearray([
-    0xff, 0xff, 0xff, 0xff, 0xff, 0xff,  # Destination MAC (Broadcast)
-    0x01, 0x02, 0x03, 0x04, 0x05, 0x06,  # Source MAC (dummy MAC)
-    0x08, 0x06,  # Frame type (ARP)
-    0x00, 0x01,  # Hardware type (Ethernet)
-    0x08, 0x00,  # Protocol type (IPv4)
-    0x06, 0x04,  # Hardware size, protocol size
-    0x00, 0x02,  # Opcode (2 for reply)
-    0x01, 0x02, 0x03, 0x04, 0x05, 0x06,  # Sender MAC (same as source MAC)
-    0xc0, 0xa8, 0x01, 0x01,  # Sender IP (dummy IP)
-    0xff, 0xff, 0xff, 0xff, 0xff, 0xff,  # Target MAC
-    0xc0, 0xa8, 0x01, 0x64  # Target IP
-])
-
 # Initialize OLED display
-i2c = SoftI2C(scl=Pin(22), sda=Pin(21))
-u8g2 = U8G2_SSD1306_128X64_NONAME_F_HW_I2C(i2c, reset=None)
+i2c = I2C(0, scl=Pin(22), sda=Pin(21))
+oled = SSD1306_I2C(128, 64, i2c)
 
-# Initialize buttons
+# Initialize LED and buttons
+led = Pin(LED_PIN, Pin.OUT)
 button_next = Pin(BUTTON_NEXT_PIN, Pin.IN, Pin.PULL_UP)
 button_prev = Pin(BUTTON_PREV_PIN, Pin.IN, Pin.PULL_UP)
 button_select = Pin(BUTTON_SELECT_PIN, Pin.IN, Pin.PULL_UP)
 
-# Wi-Fi setup
-wifi = network.WLAN(network.STA_IF)
-wifi.active(True)
+# ARP packet template
+arp_packet = bytearray([
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,  # Destination MAC
+    0x01, 0x02, 0x03, 0x04, 0x05, 0x06,  # Source MAC
+    0x08, 0x06,                          # Frame type (ARP)
+    0x00, 0x01,                          # Hardware type (Ethernet)
+    0x08, 0x00,                          # Protocol type (IPv4)
+    0x06, 0x04,                          # Hardware size, protocol size
+    0x00, 0x02,                          # Opcode (2 for reply)
+    0x01, 0x02, 0x03, 0x04, 0x05, 0x06,  # Sender MAC
+    192, 168, 1, 1,                      # Sender IP
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,  # Target MAC
+    192, 168, 1, 100                     # Target IP
+])
 
-# Function definitions
+# Wi-Fi setup
+def setupWiFi():
+    wlan = network.WLAN(network.STA_IF)
+    wlan.active(True)
+    scanWiFiNetworks()
+
+# Scan Wi-Fi networks
 def scanWiFiNetworks():
     global networkCount
-    global ssidList, macList, ipList
-
-    networks = wifi.scan()
+    wlan = network.WLAN(network.STA_IF)
+    networks = wlan.scan()
     networkCount = len(networks)
-    ssidList = []
-    macList = []
-    ipList = []
+    for net in networks:
+        ssidList.append(net[0].decode())
+        macList.append(':'.join(f'{b:02X}' for b in net[1]))
+        ipList.append(f"192.168.1.{100 + len(ssidList)}")  # Dummy IP for now
 
-    for i, net in enumerate(networks):
-        ssidList.append(net[0].decode('utf-8'))
-        macList.append(ubinascii.hexlify(net[1]).decode('utf-8'))
-        ipList.append("192.168.1." + str(100 + i))  # Dummy IPs for demonstration
-
+# Update ARP packet
 def updateARPDetails():
     global arp_packet
-    # Update ARP packet with selected MAC and IP
-    for i in range(6):
-        arp_packet[i] = targetMAC[i]  # Destination MAC
-        arp_packet[22 + i] = targetMAC[i]  # Target MAC
-    arp_packet[28:32] = bytes(wifi.ifconfig()[0].split('.'))  # Sender IP
-    arp_packet[38:42] = bytes(targetIP)  # Target IP
+    # Destination MAC
+    arp_packet[:6] = bytes(targetMAC)
+    # Sender MAC
+    sender_mac = network.WLAN(network.STA_IF).config('mac')
+    arp_packet[6:12] = sender_mac
+    arp_packet[22:28] = sender_mac
+    # Sender IP
+    local_ip = network.WLAN(network.STA_IF).ifconfig()[0]
+    local_ip_bytes = ustruct.pack('>BBBB', *[int(x) for x in local_ip.split('.')])
+    arp_packet[28:32] = local_ip_bytes
+    # Target MAC and IP
+    arp_packet[32:38] = bytes(targetMAC)
+    arp_packet[38:42] = bytes(targetIP)
 
+# Send ARP packets
 def sendARP():
-    global packetCount, prevTime
-    if toggle_status and (time.ticks_ms() - prevTime > (1000 // packetRate)):
-        prevTime = time.ticks_ms()
-        for _ in range(5):  # Send multiple ARP packets
-            # Simulate ARP transmission (Wi-Fi raw frames not supported in MicroPython)
-            print("Sending ARP packet:", ubinascii.hexlify(arp_packet))
-            time.sleep_ms(2)  # Short delay between packets
+    global prevTime, packetCount
+    if toggle_status and ticks_ms() - prevTime > (1000 // packetRate):
+        prevTime = ticks_ms()
+        for _ in range(5):
+            # Simulate sending ARP (replace with actual implementation if available)
+            print("Sending ARP packet...")
+            sleep(0.002)
+        led.on()
+        sleep(0.005)
+        led.off()
         packetCount += 5
 
-def drawNetworkList():
-    u8g2.clear_buffer()
-    u8g2.set_font(u8g2.FONT_6X10)
-    u8g2.draw_str(10, 10, "[Select Network]")
-    displayCount = min(3, networkCount)
-
-    for i in range(displayCount):
-        listIndex = (menuIndex + i) % networkCount
-        displayText = "{} {} {}".format(ssidList[listIndex], macList[listIndex], ipList[listIndex])
-        if i == 0:
-            u8g2.draw_str(0, 25 + i * 12, "->> " + displayText)
-        else:
-            u8g2.draw_str(1, 25 + i * 12, displayText)
-    u8g2.send_buffer()
-
+# Draw OLED menu
 def drawOLEDMenu():
-    u8g2.clear_buffer()
-    u8g2.set_font(u8g2.FONT_6X10)
-
+    oled.fill(0)
     if selectedNetwork == -1:
         drawNetworkList()
     else:
-        u8g2.draw_str(0, 10, "Mr.EchoFi ARP Spoofer")
-        u8g2.draw_str(1, 25, "Status: {}".format("ON" if toggle_status else "OFF"))
-        if toggle_status:
-            u8g2.draw_str(1, 40, "Packets Sent: {}".format(packetCount))
-    u8g2.send_buffer()
+        if menuIndex == 0:
+            oled.text("Mr.EchoFi ARP Spoofer", 0, 0)
+            oled.text(f"Status: {'ON' if toggle_status else 'OFF'}", 0, 16)
+        elif menuIndex == 1:
+            oled.text("Toggle Attack", 0, 0)
+            oled.text(f"{'Stop' if toggle_status else 'Start'} Attack", 0, 16)
+            oled.text(f"Packets Sent: {packetCount}", 0, 32)
+    oled.show()
 
+# Draw network list
+def drawNetworkList():
+    oled.text("Select Network", 0, 0)
+    for i in range(min(3, networkCount)):
+        list_index = (menuIndex + i) % networkCount
+        display_text = f"{ssidList[list_index]} {macList[list_index]}"
+        if i == 0:
+            oled.text(f"> {display_text}", 0, 16 + i * 12)
+        else:
+            oled.text(display_text, 0, 16 + i * 12)
+
+# Handle button presses
 def handleButtonPress():
-    global menuIndex, selectedNetwork, toggle_status, packetCount
-
+    global menuIndex, selectedNetwork, toggle_status
     if not button_next.value():
-        menuIndex = (menuIndex + 1) % (networkCount if selectedNetwork == -1 else 2)
-        time.sleep_ms(200)
-
+        menuIndex = (menuIndex + 1) % ((selectedNetwork == -1) and networkCount or 2)
+        sleep(0.2)
     if not button_prev.value():
-        menuIndex = (menuIndex - 1) % (networkCount if selectedNetwork == -1 else 2)
-        time.sleep_ms(200)
-
+        menuIndex = (menuIndex - 1) % ((selectedNetwork == -1) and networkCount or 2)
+        sleep(0.2)
     if not button_select.value():
         if selectedNetwork == -1:
             selectedNetwork = menuIndex
-            print("Selected Network:", ssidList[selectedNetwork])
-            # Update ARP details based on selected network
-            targetMAC = list(bytes.fromhex(macList[selectedNetwork]))
-            targetIP = list(map(int, ipList[selectedNetwork].split('.')))
+            targetMAC[:] = [int(x, 16) for x in macList[selectedNetwork].split(':')]
+            targetIP[:] = [int(x) for x in ipList[selectedNetwork].split('.')]
             updateARPDetails()
         elif menuIndex == 1:
             toggle_status = not toggle_status
             if not toggle_status:
                 packetCount = 0
-        time.sleep_ms(200)
+        sleep(0.2)
 
-# Main program
-scanWiFiNetworks()
-updateARPDetails()
+# Main setup
+def setup():
+    setupWiFi()
+    updateARPDetails()
+    drawOLEDMenu()
 
-while True:
+# Main loop
+def loop():
     handleButtonPress()
     drawOLEDMenu()
     sendARP()
+
+# Run the program
+setup()
+while True:
+    loop()
